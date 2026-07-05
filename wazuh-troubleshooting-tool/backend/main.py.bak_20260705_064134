@@ -177,30 +177,6 @@ def fix(service: str = ""):
 # -----------------------------
 # Filebeat Test (ADD HERE)
 # -----------------------------
-# -----------------------------
-# PATCH:CHECK-SERVICE-STATUS-V1
-# Check Service Status (systemctl status)
-# -----------------------------
-ALLOWED_STATUS_SERVICES = {
-    "wazuh-indexer",
-    "wazuh-manager",
-    "wazuh-dashboard"
-}
-
-@app.get("/status")
-def status(service: str = ""):
-    if service not in ALLOWED_STATUS_SERVICES:
-        return {"service": service, "output": "Invalid service"}
-
-    output = run(f"systemctl status {service} --no-pager")
-    is_active = run(f"systemctl is-active {service}")
-
-    return {
-        "service": service,
-        "is_active": is_active,
-        "output": output
-    }
-
 @app.get("/filebeat-test")
 def filebeat_test():
 

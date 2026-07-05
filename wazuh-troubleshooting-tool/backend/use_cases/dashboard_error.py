@@ -2,26 +2,8 @@ from executor import run_command
 from utils.fix_engine import FixEngine
 from utils.log_handler import LogHandler
 from utils.log_analyzer import LogAnalyzer
-from flows.ip_cert_flow import ip_cert_flow
-from flows.dashboard_ip_cert_flow import dashboard_ip_cert_flow          # NEW
-
-IP_CERT_STAGES = {
-    "ip_check", "ip_check_choice", "ip_auto_check",
-    "ip_manual_result", "ip_mismatch_fix",
-    "ip_post_auto_fix", "ip_post_manual_fix", "ip_post_manual_resolved",
-    "ip_confirmed_move_to_cert", "ip_recheck",
-    "cert_path_check", "cert_path_fix", "cert_path_wait",
-    "cert_perm_check", "cert_perm_fix", "cert_perm_apply", "cert_perm_final",
-}
-
-DASH_IP_CERT_STAGES = {                                                  # NEW
-    "dash_ip_check", "dash_ip_check_choice", "dash_ip_auto_check",
-    "dash_ip_manual_result", "dash_ip_mismatch_fix",
-    "dash_ip_post_auto_fix", "dash_ip_post_manual_fix",
-    "dash_ip_post_manual_resolved", "dash_ip_recheck",
-    "dash_cert_path_check", "dash_cert_path_fix", "dash_cert_path_wait",
-    "dash_cert_perm_check", "dash_cert_perm_apply", "dash_cert_perm_final",
-}
+from flows.ip_cert_flow import ip_cert_flow, STAGES as IP_CERT_STAGES
+from flows.dashboard_ip_cert_flow import dashboard_ip_cert_flow, STAGES as DASH_IP_CERT_STAGES
 
 
 def dashboard_error_flow(user_choice=None, context=None):
@@ -53,16 +35,38 @@ def dashboard_error_flow(user_choice=None, context=None):
         return response
 
     # -------------------------------------------------------------------------
-    # ROUTE TO ip_cert_flow (indexer checks)
+    # ROUTE TO ip_cert_flow (indexer checks: IP -> cert paths -> heap memory)
     # -------------------------------------------------------------------------
     if context.get("stage") in IP_CERT_STAGES:
-        return ip_cert_flow(user_choice=user_choice, context=context)
+        result = ip_cert_flow(user_choice=user_choice, context=context)
+
+        # "handoff" fires when the last step (heap) is still "ongoing" -
+        # control returns here so the dashboard IP/cert flow can continue.
+        # We fold this step's own message into whatever comes next instead
+        # of letting it get silently dropped at this boundary.
+        if result.get("handoff"):
+            next_result = dashboard_error_flow(context=result["context"])
+            if result.get("display"):
+                next_result["display"] = result["display"] + "\n\n" + next_result["display"]
+            return next_result
+
+        return result
 
     # -------------------------------------------------------------------------
-    # ROUTE TO dashboard_ip_cert_flow (dashboard checks)
+    # ROUTE TO dashboard_ip_cert_flow (dashboard checks: IP -> cert paths)
     # -------------------------------------------------------------------------
     if context.get("stage") in DASH_IP_CERT_STAGES:
-        return dashboard_ip_cert_flow(user_choice=user_choice, context=context)
+        result = dashboard_ip_cert_flow(user_choice=user_choice, context=context)
+
+        # "handoff" fires when the last step (dashboard cert paths) is
+        # still "ongoing" - hands off to log analysis (fetch_logs).
+        if result.get("handoff"):
+            next_result = dashboard_error_flow(context=result["context"])
+            if result.get("display"):
+                next_result["display"] = result["display"] + "\n\n" + next_result["display"]
+            return next_result
+
+        return result
 
     # -------------------------------------------------------------------------
     # START CHOICE
@@ -171,208 +175,15 @@ def dashboard_error_flow(user_choice=None, context=None):
             "\n\nLet's now go through the indexer checks: "
             "IP address, certificate paths, and heap memory."
         )
-        context["stage"] = "seq_ip_check"
-        return dashboard_error_flow(context=context)
+        context["stage"] = "ip_check"
 
-    # =========================================================================
-    # SEQUENTIAL INDEXER RECOVERY FLOW
-    # IP -> Cert paths -> Heap memory -> (logs if still ongoing)
-    # Each step: check -> auto/manual correct -> restart -> fixed/ongoing
-    # Stops immediately once "fixed" is reported.
-    # =========================================================================
-
-    # -------------------------------------------------------------------------
-    # SEQ: IP CHECK
-    # -------------------------------------------------------------------------
-    if context.get("stage") == "seq_ip_check":
-        ip_data = FixEngine.check_indexer_ip()
-        context["c_ip"] = ip_data["c_ip"]
-        context["i_ip"] = ip_data["i_ip"]
-
-        response["display"] = (
-            "Step 1: Checking the indexer IP address.\n\n"
-            f"  config.yml IP:                {ip_data['c_ip']}\n"
-            f"  opensearch.yml network.host:  {ip_data['i_ip']}"
-        )
-
-        if ip_data["match"]:
-            response["display"] += "\n\n[OK] IP addresses match. Moving on to certificate paths."
-            context["stage"] = "seq_cert_check"
-            return dashboard_error_flow(context=context)
-
-        response["display"] += (
-            "\n\n[ERROR] IP mismatch detected.\n\n"
-            "Would you like to auto correct this, or correct it manually?"
-        )
-        response["ask"]  = ["Fix IP? (auto correct / manual correct)"]
-        context["stage"] = "seq_ip_fix"
-        return response
-
-    # -------------------------------------------------------------------------
-    # SEQ: IP FIX
-    # -------------------------------------------------------------------------
-    if context.get("stage") == "seq_ip_fix":
-        choice = (user_choice or "").lower()
-
-        if "auto" in choice:
-            c_ip = context.get("c_ip") or ""
-            status = FixEngine.fix_indexer_ip(c_ip)
-            response["display"] = (
-                f"[OK] Updated network.host to {c_ip} in opensearch.yml.\n"
-                f"Restarted wazuh-indexer (status: {status.upper()}).\n\n"
-                "Is the dashboard issue resolved now?"
-            )
-        else:
-            c_ip = context.get("c_ip", "<config.yml IP>")
-            response["display"] = (
-                "Please edit /etc/wazuh-indexer/opensearch.yml and set:\n\n"
-                f"  network.host: {c_ip}\n\n"
-                "Then restart:\n  systemctl restart wazuh-indexer\n\n"
-                "Is the dashboard issue resolved now?"
-            )
-
-        response["ask"]  = ["Fixed or Ongoing? (fixed / ongoing)"]
-        context["stage"] = "seq_ip_result"
-        return response
-
-    # -------------------------------------------------------------------------
-    # SEQ: IP RESULT
-    # -------------------------------------------------------------------------
-    if context.get("stage") == "seq_ip_result":
-        if user_choice and "fixed" in user_choice.lower():
-            response["display"] = "Great! The issue is resolved."
-            response["done"]    = True
-            return response
-
-        response["display"] = "Understood, still ongoing. Let's check the certificate paths next."
-        context["stage"] = "seq_cert_check"
-        return dashboard_error_flow(context=context)
-
-    # -------------------------------------------------------------------------
-    # SEQ: CERT CHECK
-    # -------------------------------------------------------------------------
-    if context.get("stage") == "seq_cert_check":
-        cert_data = FixEngine.check_indexer_cert_paths()
-        context["cert_missing"] = cert_data["missing"]
-
-        response["display"] = (
-            "Step 2: Checking the indexer certificate paths.\n\n"
-            "Configured cert paths (opensearch.yml):\n"
-            f"{cert_data['paths_raw']}\n\n"
-            "Available cert files (/etc/wazuh-indexer/certs/):\n"
-            f"{cert_data['files_raw']}"
-        )
-
-        if not cert_data["missing"]:
-            response["display"] += "\n\n[OK] All configured cert paths match. Moving on to heap memory."
-            context["stage"] = "seq_heap_check"
-            return dashboard_error_flow(context=context)
-
-        response["display"] += (
-            "\n\n[ERROR] Missing cert files:\n"
-            + "\n".join(f"  - {f}" for f in cert_data["missing"])
-            + "\n\nWould you like to auto correct this, or correct it manually?"
-        )
-        response["ask"]  = ["Fix cert paths? (auto correct / manual correct)"]
-        context["stage"] = "seq_cert_fix"
-        return response
-
-    # -------------------------------------------------------------------------
-    # SEQ: CERT FIX
-    # -------------------------------------------------------------------------
-    if context.get("stage") == "seq_cert_fix":
-        choice = (user_choice or "").lower()
-
-        if "auto" in choice:
-            result = FixEngine.fix_indexer_cert_paths()
-            if result.get("success"):
-                response["display"] = (
-                    "[OK] Updated cert paths:\n\n"
-                    f"  cert: {result['cert']}\n  key: {result['key']}\n  CA: {result['ca']}\n\n"
-                    f"Restarted wazuh-indexer (status: {result['status'].upper()}).\n\n"
-                    "Is the dashboard issue resolved now?"
-                )
-            else:
-                response["display"] = (
-                    "[ERROR] Could not auto-identify cert files. Please fix manually.\n\n"
-                    "Is the dashboard issue resolved now?"
-                )
-        else:
-            response["display"] = (
-                "Please update the cert paths in /etc/wazuh-indexer/opensearch.yml "
-                "to match the files in /etc/wazuh-indexer/certs/, then restart:\n"
-                "  systemctl restart wazuh-indexer\n\n"
-                "Is the dashboard issue resolved now?"
-            )
-
-        response["ask"]  = ["Fixed or Ongoing? (fixed / ongoing)"]
-        context["stage"] = "seq_cert_result"
-        return response
-
-    # -------------------------------------------------------------------------
-    # SEQ: CERT RESULT
-    # -------------------------------------------------------------------------
-    if context.get("stage") == "seq_cert_result":
-        if user_choice and "fixed" in user_choice.lower():
-            response["display"] = "Great! The issue is resolved."
-            response["done"]    = True
-            return response
-
-        response["display"] = "Understood, still ongoing. Let's check the heap memory configuration next."
-        context["stage"] = "seq_heap_check"
-        return dashboard_error_flow(context=context)
-
-    # -------------------------------------------------------------------------
-    # SEQ: HEAP CHECK
-    # -------------------------------------------------------------------------
-    if context.get("stage") == "seq_heap_check":
-        heap_data = FixEngine.check_jvm_heap()
-        context["recommended_heap"] = heap_data["recommended_heap"]
-
-        response["display"] = (
-            "Step 3: Checking the indexer heap memory configuration.\n\n"
-            f"Current: {heap_data['current']}\n\n"
-            f"Total RAM: {heap_data['total_gb']} GB\n"
-            f"Recommended: -Xms{heap_data['recommended_heap']}g / -Xmx{heap_data['recommended_heap']}g\n\n"
-            "Would you like to auto correct this, or correct it manually?"
-        )
-        response["ask"]  = ["Fix heap? (auto correct / manual correct)"]
-        context["stage"] = "seq_heap_fix"
-        return response
-
-    # -------------------------------------------------------------------------
-    # SEQ: HEAP FIX
-    # -------------------------------------------------------------------------
-    if context.get("stage") == "seq_heap_fix":
-        choice = (user_choice or "").lower()
-
-        if "auto" in choice:
-            heap_gb = context.get("recommended_heap", 2)
-            updated = FixEngine.fix_jvm_heap(heap_gb)
-            response["display"] = (
-                "Edited jvm.options and restarted wazuh-indexer.\n\n"
-                f"Current heap settings:\n{updated}\n\n"
-                "Is the dashboard issue resolved now?"
-            )
-        else:
-            response["display"] = FixEngine.heap_steps() + "\n\nIs the dashboard issue resolved now?"
-
-        response["ask"]  = ["Fixed or Ongoing? (fixed / ongoing)"]
-        context["stage"] = "seq_heap_result"
-        return response
-
-    # -------------------------------------------------------------------------
-    # SEQ: HEAP RESULT
-    # -------------------------------------------------------------------------
-    if context.get("stage") == "seq_heap_result":
-        if user_choice and "fixed" in user_choice.lower():
-            response["display"] = "Great! The issue is resolved."
-            response["done"]    = True
-            return response
-
-        response["display"] = "Understood, still ongoing. Let's move on to the indexer logs."
-        context["stage"] = "fetch_logs"
-        return dashboard_error_flow(context=context)
+        # Preserve this message — indexer_recovery_flow's own first
+        # response (the Step 1 permission question) would otherwise
+        # completely replace it here.
+        restart_msg = response["display"]
+        next_response = dashboard_error_flow(context=context)
+        next_response["display"] = restart_msg + "\n\n" + next_response["display"]
+        return next_response
 
     # -------------------------------------------------------------------------
     # MANUAL FOLLOW-UP
@@ -424,64 +235,12 @@ def dashboard_error_flow(user_choice=None, context=None):
             "\n\nLet's now go through the indexer checks: "
             "IP address, certificate paths, and heap memory."
         )
-        context["stage"] = "seq_ip_check"
-        return dashboard_error_flow(context=context)
+        context["stage"] = "ip_check"
 
-    # -------------------------------------------------------------------------
-    # MANUAL SPECIFIC HELP
-    # -------------------------------------------------------------------------
-    if context.get("stage") == "manual_specific_help":
-
-        choice = (user_choice or "").lower()
-
-        if "cert" in choice:
-            context["stage"] = "dash_cert_perm_check"
-            return dashboard_error_flow(context=context)
-
-        elif "ip" in choice:
-            context["stage"] = "dash_ip_check"
-            return dashboard_error_flow(context=context)
-
-        elif "log" in choice:
-            context["stage"] = "fetch_logs"
-            return dashboard_error_flow(context=context)
-
-        elif "password" in choice:
-
-            response["display"] = (
-                "To reset the kibanaserver password:\n\n"
-
-                "Step 1 — Change the password "
-                "(8-64 chars, upper/lowercase, numbers, symbol from .*+?-):\n"
-
-                "  /usr/share/wazuh-indexer/plugins/opensearch-security/tools/"
-                "wazuh-passwords-tool.sh -u kibanaserver -p '<new_password>'\n\n"
-
-                "Step 2 — Update the dashboard keystore:\n"
-
-                "  echo <new_password> | "
-                "/usr/share/wazuh-dashboard/bin/opensearch-dashboards-keystore "
-                "--allow-root add -f --stdin opensearch.password\n\n"
-
-                "Step 3 — Restart the dashboard:\n"
-                "  systemctl restart wazuh-dashboard\n\n"
-
-                "Ref: https://documentation.wazuh.com/current/user-manual/"
-                "user-administration/password-management.html"
-            )
-
-            response["ask"]  = ["Did that help? (resolved / need more help)"]
-            context["stage"] = "final_status_check"
-            return response
-
-        elif "restart" in choice:
-            FixEngine.restart_indexer_and_wait()
-            context["stage"] = "seq_ip_check"
-            return dashboard_error_flow(context=context)
-
-        else:
-            context["stage"] = "fetch_logs"
-            return dashboard_error_flow(context=context)
+        restart_msg = response["display"]
+        next_response = dashboard_error_flow(context=context)
+        next_response["display"] = restart_msg + "\n\n" + next_response["display"]
+        return next_response
 
     # -------------------------------------------------------------------------
     # FETCH LOGS
@@ -733,13 +492,13 @@ def dashboard_error_flow(user_choice=None, context=None):
         if user_choice and "auto" in user_choice.lower():
 
             heap_gb = context.get("recommended_heap", 2)
-            updated = FixEngine.fix_jvm_heap(heap_gb)
+            result = FixEngine.fix_jvm_heap(heap_gb)
 
             response["display"] = (
                 "Edited /etc/wazuh-indexer/jvm.options\n\n"
-                "Restarted wazuh-indexer.\n\n"
+                f"Restarted wazuh-indexer (status: {result['status'].upper()}).\n\n"
                 "Current JVM heap settings:\n"
-                f"{updated}"
+                f"{result['updated']}"
             )
 
             response["ask"]  = ["Is the dashboard issue fixed? (fixed / ongoing)"]
@@ -1100,9 +859,12 @@ def dashboard_error_flow(user_choice=None, context=None):
                 "Let's now go through the indexer checks: "
                 "IP address, certificate paths, and heap memory."
             )
-            context["stage"] = "seq_ip_check"
-            response["context"] = context
-            return dashboard_error_flow(context=context)
+            context["stage"] = "ip_check"
+
+            restart_msg = response["display"]
+            next_response = dashboard_error_flow(context=context)
+            next_response["display"] = restart_msg + "\n\n" + next_response["display"]
+            return next_response
 
         # indexer is active but dashboard still can't connect
         response["display"] = (

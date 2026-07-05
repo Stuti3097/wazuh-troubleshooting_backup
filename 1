@@ -1,15 +1,31 @@
 from executor import run_command
 from config import KIBANA_USERNAME, INDEXER_URL
-from utils.cache_utils import cached
-from utils.archive_utils import extract_from_archive
-from utils.service_utils import restart_service_and_wait, get_service_status
 
 import re
 import secrets
 import string
+import time
 
 
 class FixEngine:
+
+    # Simple in-memory cache for values that are slow to read (e.g. the
+    # control IP, which requires extracting a file from a tar archive that
+    # may live on a slow filesystem, such as a VirtualBox/Vagrant shared
+    # folder). These values don't change mid-session, so re-reading them on
+    # every troubleshooting step wastes time for no benefit.
+    _cache = {}
+    _cache_ttl = 300  # seconds
+
+    @classmethod
+    def _cached(cls, key, compute_fn):
+        now = time.time()
+        entry = cls._cache.get(key)
+        if entry and (now - entry[0]) < cls._cache_ttl:
+            return entry[1]
+        value = compute_fn()
+        cls._cache[key] = (now, value)
+        return value
 
     # -----------------------------------------
     # GET IP FROM config.yml (control file)
@@ -17,18 +33,29 @@ class FixEngine:
     @staticmethod
     def get_control_ip():
 
-        # Cached (utils/cache_utils.py): avoid re-reading this on every
-        # single troubleshooting step within the same session. The read
-        # itself uses utils/archive_utils.py, which copies the archive to
-        # local disk once before extracting — much faster than extracting
-        # directly from /home/vagrant if that's a slow shared folder.
-        output = cached(
-            "control_ip_raw",
-            lambda: extract_from_archive(
-                "/home/vagrant/wazuh-install-files.tar",
-                "wazuh-install-files/config.yml",
-            ),
-        )
+        def _read():
+            local_copy = "/tmp/wazuh-install-files.tar"
+
+            # The archive normally lives on /home/vagrant, which is often a
+            # VirtualBox/Vagrant SHARED folder. Extracting a single file
+            # directly from it with "tar -O" requires many small read/seek
+            # calls as tar walks the archive, and each of those calls can
+            # carry real latency on a shared folder — this alone can take
+            # well over a minute. Copying the whole archive once with a
+            # single sequential read is much faster on a shared folder, and
+            # then we extract from the local copy on real disk instead.
+            run_command(
+                f"[ -f {local_copy} ] || "
+                f"cp /home/vagrant/wazuh-install-files.tar {local_copy}"
+            )
+
+            return run_command(
+                f"tar -axf {local_copy} wazuh-install-files/config.yml -O"
+            ) or ""
+
+        # Cached: avoid re-reading this on every single troubleshooting step
+        # within the same session.
+        output = FixEngine._cached("control_ip_raw", _read)
 
         in_indexer = False
 
@@ -182,28 +209,46 @@ class FixEngine:
     # -----------------------------------------
     @staticmethod
     def restart_indexer():
-        status = restart_service_and_wait("wazuh-indexer")
-        return f"Status after restart: {status}"
+        out    = run_command("systemctl --no-block restart wazuh-indexer") or ""
+        status = run_command("systemctl is-active wazuh-indexer") or ""
+        return f"Restart output:\n{out}\nStatus after restart: {status}"
 
     # -----------------------------------------
     # RESTART INDEXER AND WAIT FOR ACTIVE STATE
     # Returns the final status string ("active", "failed", "activating", etc.)
     #
-    # Delegates to utils/service_utils.py, which uses "--no-block" so the
-    # restart command returns immediately instead of blocking indefinitely
-    # while a slow-starting service (e.g. JVM-based wazuh-indexer) comes up,
-    # then polls "is-active" itself with a bounded, predictable window.
+    # IMPORTANT: plain "systemctl restart wazuh-indexer" is a BLOCKING call —
+    # it doesn't return until systemd considers the unit fully started. For a
+    # Java/OpenSearch-based service like wazuh-indexer, that startup can take
+    # a long time on its own (and is much worse if the JVM heap is misconfigured
+    # relative to available RAM, causing swapping). That made this function
+    # look "stuck" with zero feedback while the OS-level command just sat there.
+    #
+    # Fix: use --no-block so systemd queues the restart and returns to us
+    # immediately, then we do our own polling of "is-active" with a bounded,
+    # predictable window instead of being at the mercy of an indefinite block.
     # -----------------------------------------
     @staticmethod
     def restart_indexer_and_wait(max_attempts=20, delay=3):
-        return restart_service_and_wait("wazuh-indexer", max_attempts=max_attempts, delay=delay)
+        import time
+
+        run_command("systemctl --no-block restart wazuh-indexer")
+
+        status = ""
+        for _ in range(max_attempts):
+            time.sleep(delay)
+            status = (run_command("systemctl is-active wazuh-indexer") or "").strip()
+            if status == "active":
+                break
+
+        return status
 
     # -----------------------------------------
     # DASHBOARD STATUS
     # -----------------------------------------
     @staticmethod
     def status_dashboard():
-        return get_service_status("wazuh-dashboard") or "unknown"
+        return run_command("systemctl is-active wazuh-dashboard") or "unknown"
 
     # -----------------------------------------
     # INDEXER STATUS
@@ -476,110 +521,3 @@ class FixEngine:
         heap_gb = max(1, total_gb // 2)
 
         return {"current": current, "total_gb": total_gb, "recommended_heap": heap_gb}
-
-    # -----------------------------------------
-    # CHECK DASHBOARD IP
-    # -----------------------------------------
-    @staticmethod
-    def check_dashboard_ip():
-        dash_raw = FixEngine.get_dashboard_ip()
-        control  = FixEngine.get_control_ip()
-
-        d_ip = FixEngine.extract_ip(dash_raw)
-        c_ip = FixEngine.extract_ip(control)
-
-        return {
-            "d_ip":  d_ip,
-            "c_ip":  c_ip,
-            "match": bool(d_ip and c_ip and d_ip == c_ip),
-        }
-
-    # -----------------------------------------
-    # FIX DASHBOARD IP (auto correct) + restart, waits for active
-    # -----------------------------------------
-    @staticmethod
-    def fix_dashboard_ip(c_ip):
-        run_command(
-            f"sed -i 's|https://.*:9200|https://{c_ip}:9200|' "
-            "/etc/wazuh-dashboard/opensearch_dashboards.yml"
-        )
-        return restart_service_and_wait("wazuh-dashboard")
-
-    # -----------------------------------------
-    # CHECK DASHBOARD CERT PATHS
-    # -----------------------------------------
-    @staticmethod
-    def check_dashboard_cert_paths():
-        paths_raw = run_command(
-            "grep -E 'ssl.certificate|ssl.key|certificateAuthorities' "
-            "/etc/wazuh-dashboard/opensearch_dashboards.yml"
-        ) or ""
-
-        files_raw = run_command("ls /etc/wazuh-dashboard/certs") or ""
-
-        configured = []
-        for line in paths_raw.splitlines():
-            if ":" in line:
-                val = line.split(":", 1)[1].strip().strip('"').strip("'").strip("[]")
-                val = val.strip('"').strip("'")
-                filename = val.split("/")[-1]
-                if filename:
-                    configured.append(filename)
-
-        actual  = [f.strip() for f in files_raw.splitlines() if f.strip()]
-        missing = [f for f in configured if f not in actual]
-
-        return {
-            "paths_raw": paths_raw,
-            "files_raw": files_raw,
-            "missing":   missing,
-        }
-
-    # -----------------------------------------
-    # FIX DASHBOARD CERT PATHS (auto correct) + restart, waits for active
-    # -----------------------------------------
-    @staticmethod
-    def fix_dashboard_cert_paths():
-        actual_files = run_command("ls /etc/wazuh-dashboard/certs") or ""
-        actual = [f.strip() for f in actual_files.splitlines() if f.strip()]
-
-        key  = next((f for f in actual if "key" in f and "admin" not in f), None)
-        cert = next((f for f in actual if "key" not in f and "root" not in f
-                     and "admin" not in f and "ca" not in f.lower()), None)
-        ca   = next((f for f in actual if "root-ca" in f or
-                     ("ca" in f.lower() and "key" not in f)), None)
-
-        if not (key and cert and ca):
-            return {"success": False}
-
-        base = "/etc/wazuh-dashboard/certs"
-        cmds = [
-            f"sed -i 's|server.ssl.certificate:.*|server.ssl.certificate: {base}/{cert}|g' "
-            "/etc/wazuh-dashboard/opensearch_dashboards.yml",
-            f"sed -i 's|server.ssl.key:.*|server.ssl.key: {base}/{key}|g' "
-            "/etc/wazuh-dashboard/opensearch_dashboards.yml",
-            "sed -i 's|opensearch.ssl.certificateAuthorities:.*"
-            f"|opensearch.ssl.certificateAuthorities: [\"{base}/{ca}\"]|g' "
-            "/etc/wazuh-dashboard/opensearch_dashboards.yml",
-        ]
-        for cmd in cmds:
-            run_command(cmd)
-
-        status = restart_service_and_wait("wazuh-dashboard")
-
-        return {"success": True, "cert": cert, "key": key, "ca": ca, "status": status}
-
-    # -----------------------------------------
-    # DASHBOARD CERT PATH MANUAL STEPS
-    # -----------------------------------------
-    @staticmethod
-    def dashboard_cert_path_steps():
-        return (
-            "Update the cert paths in:\n"
-            "  /etc/wazuh-dashboard/opensearch_dashboards.yml\n\n"
-            "Keys to fix:\n"
-            "  server.ssl.certificate\n"
-            "  server.ssl.key\n"
-            "  opensearch.ssl.certificateAuthorities\n\n"
-            "Match them to the files in /etc/wazuh-dashboard/certs/"
-        )
