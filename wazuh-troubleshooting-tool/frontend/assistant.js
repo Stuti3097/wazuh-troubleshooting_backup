@@ -157,17 +157,25 @@ async function sendChatMessageTarget(target, value) {
             
             // Parse options for any follow-up questions
             if (r.ask && r.ask.length > 0) {
-                const nextQuestion = r.ask[0];
-                const parsed = parseQuestionOptions(nextQuestion);
-                
-                if (parsed && parsed.options.length > 0) {
-                    printBubbleTarget(target, parsed.question, "system");
-                    renderOptionsTarget(target, parsed.options, (selectedOpt) => {
+                if (r.ask.length > 1) {
+                    // Already a list of standalone option labels - render them
+                    // directly as buttons, no parenthetical parsing needed.
+                    renderOptionsTarget(target, r.ask, (selectedOpt) => {
                         sendChatMessageTarget(target, selectedOpt);
                     });
                 } else {
-                    // No choices -> simple text input prompt
-                    printBubbleTarget(target, nextQuestion, "system");
+                    const nextQuestion = r.ask[0];
+                    const parsed = parseQuestionOptions(nextQuestion);
+
+                    if (parsed && parsed.options.length > 0) {
+                        printBubbleTarget(target, parsed.question, "system");
+                        renderOptionsTarget(target, parsed.options, (selectedOpt) => {
+                            sendChatMessageTarget(target, selectedOpt);
+                        });
+                    } else {
+                        // No choices -> simple text input prompt
+                        printBubbleTarget(target, nextQuestion, "system");
+                    }
                 }
             }
 

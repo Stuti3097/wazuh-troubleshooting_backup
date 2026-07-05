@@ -12,10 +12,20 @@ USE_CASES = [
             "dashboard not ready",
             "dashboard cannot connect to indexer",
             "wazuh dashboard is not ready yet",
-            "dashboard connectivity problems",
-            "application not found"
+            "dashboard connectivity problems"
         ],
         "handler": "dashboard_error"
+    },
+    {
+        "name": "Application Not Found",
+        "phrases": [
+            "application not found",
+            "app not found",
+            "application not found error",
+            "wazuh dashboard application not found",
+            "page not found after upgrade"
+        ],
+        "handler": "app_not_found"
     },
     {
         "name": "Alerts Not Showing",
@@ -104,6 +114,9 @@ def run_use_cases(user_input, context):
         if handler == "dashboard_error":
             from .dashboard_error import dashboard_error_flow
             return dashboard_error_flow(user_input, context)
+        elif handler == "app_not_found":
+            from .app_not_found import app_not_found_flow
+            return app_not_found_flow(user_input, context)
         elif handler == "indexing_error":
             from .indexing_error import indexing_error_flow
             return indexing_error_flow(user_input, context)
@@ -130,6 +143,9 @@ def run_use_cases(user_input, context):
         if handler == "dashboard_error":
             from .dashboard_error import dashboard_error_flow
             result = dashboard_error_flow(None, {})
+        elif handler == "app_not_found":
+            from .app_not_found import app_not_found_flow
+            result = app_not_found_flow(None, {})
         elif handler == "indexing_error":
             from .indexing_error import indexing_error_flow
             result = indexing_error_flow(None, {})
