@@ -147,7 +147,7 @@ def _stop(response, title, explanation, manual_fix):
     return response
 
 
-def alerts_not_showing_flow(user_choice=None, context=None):
+def no_alerts_are_showing_flow(user_choice=None, context=None):
     if context is None:
         context = {}
 
@@ -183,7 +183,7 @@ def alerts_not_showing_flow(user_choice=None, context=None):
     if stage in FILEBEAT_STAGES:
         result = filebeat_flow(user_choice=choice, context=context)
         if result.get("handoff"):
-            next_result = alerts_not_showing_flow(context=result["context"])
+            next_result = no_alerts_are_showing_flow(context=result["context"])
             next_display = next_result["display"].lstrip("\n")
             next_result["display"] = (
                 f"{result['display']}\n\n{next_display}" if result.get("display") else next_display

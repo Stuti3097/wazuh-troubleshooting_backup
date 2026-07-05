@@ -9,9 +9,13 @@ unreachable (no point iterating on Filebeat if the indexer is the problem).
 
 This module owns everything specific to Filebeat: what to check, why we're
 checking it, what the manual instructions are, how to fix each known
-failure category. It hands off to the caller (use_cases/alerts_not_showing.py)
+failure category. It hands off to the caller (use_cases/no_alerts_are_showing.py)
 by setting context["stage"] = STEP4_ENTRY_STAGE and returning handoff=True,
 the same pattern used by flows/ip_cert_flow.py and flows/dashboard_ip_cert_flow.py.
+
+Also reused standalone by use_cases/filebeat_error.py, a Filebeat-only
+troubleshooting card that stops on handoff instead of continuing into the
+indexer/cluster steps.
 """
 
 from utils.response_utils import make_response

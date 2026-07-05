@@ -35,7 +35,34 @@ USE_CASES = [
             "no alerts",
             "alerts missing"
         ],
-        "handler": "alerts_not_showing"
+        "handler": "no_alerts_are_showing"
+    },
+    {
+        "name": "Filebeat Error",
+        "phrases": [
+            "filebeat not working",
+            "filebeat is not working",
+            "filebeat error",
+            "filebeat test output",
+            "issue in filebeat test output",
+            "filebeat down",
+            "filebeat not running"
+        ],
+        "handler": "filebeat_error"
+    },
+    {
+        "name": "Filebeat Mapping Issue",
+        "phrases": [
+            "filebeat mapping issue",
+            "field mapping issue",
+            "mapping conflict",
+            "illegal argument exception",
+            "mapper parsing exception",
+            "shards failed",
+            "index template issue",
+            "wazuh template issue"
+        ],
+        "handler": "mapping_issue"
     },
     {
         "name": "Alerts Not Indexing",
@@ -123,12 +150,18 @@ def run_use_cases(user_input, context):
         elif handler == "api_error":
             from .api_error import api_error_flow
             return api_error_flow(user_input, context)
-        elif handler == "alerts_not_showing":
-            from .alerts_not_showing import alerts_not_showing_flow
-            return alerts_not_showing_flow(user_input, context)
+        elif handler == "no_alerts_are_showing":
+            from .no_alerts_are_showing import no_alerts_are_showing_flow
+            return no_alerts_are_showing_flow(user_input, context)
         elif handler == "cluster_issues":
             from .cluster_issues import cluster_issues_flow
             return cluster_issues_flow(user_input, context)
+        elif handler == "filebeat_error":
+            from .filebeat_error import filebeat_error_flow
+            return filebeat_error_flow(user_input, context)
+        elif handler == "mapping_issue":
+            from .mapping_issue import mapping_issue_flow
+            return mapping_issue_flow(user_input, context)
 
         return None
 
@@ -152,12 +185,18 @@ def run_use_cases(user_input, context):
         elif handler == "api_error":
             from .api_error import api_error_flow
             result = api_error_flow(None, {})
-        elif handler == "alerts_not_showing":
-            from .alerts_not_showing import alerts_not_showing_flow
-            result = alerts_not_showing_flow(None, {})
+        elif handler == "no_alerts_are_showing":
+            from .no_alerts_are_showing import no_alerts_are_showing_flow
+            result = no_alerts_are_showing_flow(None, {})
         elif handler == "cluster_issues":
             from .cluster_issues import cluster_issues_flow
             result = cluster_issues_flow(None, {})
+        elif handler == "filebeat_error":
+            from .filebeat_error import filebeat_error_flow
+            result = filebeat_error_flow(None, {})
+        elif handler == "mapping_issue":
+            from .mapping_issue import mapping_issue_flow
+            result = mapping_issue_flow(None, {})
         else:
             return None
 

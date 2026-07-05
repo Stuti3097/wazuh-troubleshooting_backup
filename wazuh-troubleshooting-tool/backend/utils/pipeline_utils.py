@@ -3,7 +3,7 @@ Reusable helpers for diagnosing the full Wazuh alert pipeline:
 
     Wazuh Agent -> Wazuh Manager -> alerts.json -> Filebeat -> Wazuh Indexer -> Dashboard
 
-Centralized here so any use case (alerts_not_showing, indexing_error,
+Centralized here so any use case (no_alerts_are_showing, indexing_error,
 cluster_issues, etc.) can reuse the same checks instead of each one
 re-implementing ossec.conf parsing / alerts.json staleness / shard
 analysis by hand.
